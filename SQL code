@@ -1,49 +1,40 @@
-#transaction table with user id and no of transaction/orders
-WITH transaction_table AS (
-    SELECT
-        user_crm_id,
-        COUNT(DISTINCT transaction_id) AS no_of_orders
-    FROM `prism-2023-c1.Prism_Main.transactions` AS t
-    GROUP BY user_crm_id
-),
+with transaction_table as (
+select user_crm_id, count(distinct(transaction_id)) as no_of_orders
+from `prism-2023-c1.Prism_Main.transactions` as t
+group by user_crm_id),
+
+orders_revenue_table as (SELECT user_crm_id, latest_login_date,
+DATE_DIFF('2022-12-31', latest_purchase_date, DAY) AS days_since_last_purchase,
+opt_in_status, total_revenue
+FROM `prism-2023-c1.Prism_Main.users` as u),
+
+metrics_table as (select orders_revenue_table.user_crm_id,latest_login_date, orders_revenue_table.days_since_last_purchase,
+transaction_table.no_of_orders, orders_revenue_table.total_revenue from orders_revenue_table
+join transaction_table
+on orders_revenue_table.user_crm_id = transaction_table.user_crm_id
+where opt_in_status = true),
+
+metrics_score_table as (select user_crm_id,latest_login_date, days_since_last_purchase,
+NTILE(10) OVER (ORDER BY days_since_last_purchase) as recency_score,
+no_of_orders, NTILE(100) OVER (ORDER BY no_of_orders) as frequency_score,
+total_revenue, NTILE(100) OVER (ORDER BY total_revenue) as monetary_score
+from metrics_table),
 
 
-#most recent purchased and total revenue table with user id
-orders_revenue_table AS (
-    SELECT
-        user_crm_id,
-        DATE_DIFF('2022-12-31', latest_purchase_date, DAY) AS days_since_last_purchase,
-        opt_in_status,
-        total_revenue
-    FROM `prism-2023-c1.Prism_Main.users` AS u
-),
-
-
-#join tables together on user_id key
-metrics_table AS (
-    SELECT
-        orders_revenue_table.user_crm_id,
-        orders_revenue_table.days_since_last_purchase,
-        transaction_table.no_of_orders,
-        orders_revenue_table.total_revenue
-    FROM orders_revenue_table
-    JOIN transaction_table
-        ON orders_revenue_table.user_crm_id = transaction_table.user_crm_id
-    WHERE opt_in_status = true
-),
-
-
-#caculate quartiles/scores for each metric
-metrics_score_table AS (
-    SELECT
-        user_crm_id,
-        days_since_last_purchase,
-        CASE WHEN days_since_last_purchase IS NULL THEN 0 ELSE 1 END AS purchased_or_never_purchased,
-        NTILE(4) OVER (PARTITION BY CASE WHEN days_since_last_purchase IS NULL THEN 0 ELSE 1 END ORDER BY days_since_last_purchase) AS recency_score,
-        no_of_orders,
-        NTILE(4) OVER (ORDER BY no_of_orders) AS frequency_score,
-        total_revenue,
-        NTILE(4) OVER (ORDER BY total_revenue) AS monetary_score
-    FROM metrics_table
-)
-SELECT * FROM metrics_score_table;
+segmented_table as (select user_crm_id, latest_login_date, days_since_last_purchase, recency_score,
+no_of_orders, frequency_score, 
+total_revenue, monetary_score,
+CASE
+WHEN recency_score <=2 AND frequency_score >= 97 AND monetary_score >= 97 THEN 'Champions'
+WHEN recency_score >= 3 AND (frequency_score BETWEEN 57 AND 95) AND monetary_score >= 50 THEN 'Hibernating'
+WHEN frequency_score >= 80 AND monetary_score <= 85 THEN 'Bargain Hunters'
+WHEN recency_score <= 2 AND frequency_score <= 57 THEN 'New Customers'
+WHEN frequency_score >= 96 THEN 'Loyal'
+WHEN recency_score <= 2 THEN 'Recent Customers'
+WHEN recency_score >= 6 THEN 'Inactive'
+ELSE 'Other'
+END AS segment
+from metrics_score_table)
+ 
+select * from segmented_table
+;
